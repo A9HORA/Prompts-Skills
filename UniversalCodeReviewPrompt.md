@@ -29,6 +29,15 @@ State which platform modules were activated and why in the report header.
  
 Perform a source code and configuration security review of this repository. Cover only the categories listed below that are activated by the platform detection above.
  
+### How to read category descriptions
+ 
+Each category below describes a **vulnerability pattern** — the dangerous behavior and why it matters. Specific function names, libraries, and framework APIs are listed as *illustrative examples, not an exhaustive checklist*. The reviewer must:
+ 
+1. **Search for the pattern, not just the named functions.** If a category says "`lodash.merge` with user-controlled keys," the actual vulnerability is *any deep/recursive merge of untrusted input into an object* — including custom utility functions, newer libraries, or native APIs that achieve the same effect.
+2. **Adapt to the project's language and framework.** If the examples are JavaScript but the repo is Go, find the Go equivalent of the same dangerous pattern. The concept transfers even when the API name doesn't.
+3. **Flag novel sinks.** If you find a dangerous pattern not listed in any category but clearly exploitable, report it under the closest matching category and note it as an unlisted variant.
+The per-language examples (JS, Python, Go, Java, Ruby, Rust, C#) included in some categories are starting points. The absence of a language-specific example does not mean the pattern is irrelevant for that language.
+ 
 ---
  
 ## Base categories (1–37) — always apply
@@ -47,10 +56,10 @@ SQL queries built with string concatenation or template literals instead of para
 NoSQL operator injection (`$gt`, `$ne` in MongoDB queries from user input). Template injection in Jinja2, Pug, EJS, Handlebars, Twig when user input reaches template compilation (not just variable rendering).
  
 **2. SSRF — outbound HTTP with user-controlled URL**
-Any HTTP client (`fetch`, `axios`, `got`, `requests`, `HttpClient`) where the URL, hostname, or path segment comes from user input. Include: cloud metadata endpoints (`169.254.169.254`, `fd00::`, `[::ffff:169.254.169.254]`), DNS rebinding bypasses of private-IP filters, redirect-following into internal networks. Check for TOCTOU between DNS resolution and connection.
+Any outbound HTTP/HTTPS request where the URL, hostname, or path segment comes from user input — regardless of which HTTP client library is used. The pattern: attacker controls where the server sends a request. Include: cloud metadata endpoint access (`169.254.169.254`, `fd00::`, `[::ffff:169.254.169.254]`), DNS rebinding bypasses of private-IP filters, redirect-following that lands on internal networks, and TOCTOU between DNS resolution and connection.
  
 **3. Path traversal — file system ops with user input**
-`fs.readFile`, `fs.writeFile`, `open()`, `os.path.join()`, `path.resolve()`, `path.join()` where any path component derives from request input. Check for `../` normalization bypass, null byte injection, URL-encoded traversal, and symlink following.
+Any file system operation (read, write, delete, stat, list) where the file path or any path component derives from request input. The pattern: user controls part of a path that reaches a file system API without canonicalization and confinement to an expected directory. Check for `../` normalization bypass, null byte injection, URL-encoded traversal (`%2e%2e%2f`), double-encoding, and symlink following. Applies to all languages and their respective file APIs.
  
 **4. Open redirect**
 Redirect targets (`Location` header, `res.redirect()`, `window.location.assign()`, `router.push()`, meta refresh) sourced from query params, headers (Referer, Host, X-Forwarded-Host), cookies, or request body without validation against a parsed-hostname allowlist. Flag: string prefix/suffix matching on URLs (e.g. `startsWith('https://example.com')` matching `https://example.com.evil.tld`), regex without anchors, substring checks.
@@ -107,10 +116,10 @@ Public input (query params, headers, body fields) passed to internal services, m
 Dynamic `Access-Control-Allow-Origin` from `Origin` header without allowlist validation. `Access-Control-Allow-Credentials: true` with wildcard or reflected origin. `Access-Control-Allow-Origin: *` on authenticated endpoints.
  
 **19. Permissive TLS / infra config**
-`rejectUnauthorized: false`, `verify=False`, `InsecureSkipVerify: true`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `CURLOPT_SSL_VERIFYPEER => false`. Public S3/GCS buckets, wide-open security groups, permissive IAM policies in IaC files.
+Any code or configuration that disables TLS certificate verification on outbound connections — the pattern is "trust any certificate presented by the remote server." Examples by ecosystem: Node.js `rejectUnauthorized: false` or `NODE_TLS_REJECT_UNAUTHORIZED=0`, Python `verify=False`, Go `InsecureSkipVerify: true`, PHP `CURLOPT_SSL_VERIFYPEER => false`, Java `TrustAllCerts` implementations, .NET `ServerCertificateCustomValidationCallback` returning `true`. Also: public cloud storage buckets (S3, GCS, Azure Blob) without access restrictions, overly permissive security groups or firewall rules, and IAM policies with `*` resource/action in IaC files.
  
 **20. Proxy trust misconfiguration**
-Express `trust proxy` set to `true` (trusts all) without IP/CIDR restriction. `X-Forwarded-Host`/`X-Forwarded-For`/`X-Forwarded-Proto` accepted from untrusted sources. `req.hostname`, `req.ip`, `req.protocol` used for security decisions under unrestricted proxy trust. This is a force multiplier for open redirect, SSRF, and host-header injection bugs.
+Application configured to trust forwarded headers (`X-Forwarded-Host`, `X-Forwarded-For`, `X-Forwarded-Proto`) from any upstream without restricting to known proxy IPs/CIDRs. The pattern: client-derived hostname, IP, or protocol used for security decisions because the framework believes a trusted proxy set them. Examples: Express `trust proxy` set to `true` (trusts all), ASP.NET `ForwardedHeadersOptions` without `KnownProxies`, Nginx `set_real_ip_from 0.0.0.0/0`, Django `SECURE_PROXY_SSL_HEADER` without matching reverse-proxy config. This is a force multiplier — it enables open redirect, SSRF, and host-header injection through downstream findings.
  
 **21. Subdomain / host validation flaws**
 String prefix, suffix, or contains checks on hostnames instead of parsed `URL` hostname comparison. `endsWith('.example.com')` matching `evil-example.com`. `startsWith('https://example.com')` matching `https://example.com.evil.tld`. `includes('example.com')` matching `notexample.com`. Must use `new URL(x).hostname` and exact or suffix match against `.` boundary.
@@ -118,13 +127,13 @@ String prefix, suffix, or contains checks on hostnames instead of parsed `URL` h
 ### Abuse and resilience
  
 **22. Rate limiting and abuse controls**
-Auth endpoints (login, register, password reset, OTP verify), expensive operations (AI completions, search, PDF generation, email send), and payment flows missing rate limits. Check for: no middleware (`express-rate-limit`, `ratelimiter`), no API gateway throttle config, no per-IP/per-user caps.
+Endpoints performing expensive, sensitive, or abusable operations without throttling — the pattern is "unauthenticated or low-cost repeated invocation with no cap." Check: authentication flows (login, register, password reset, OTP/MFA verify), AI/LLM completion endpoints, search, PDF/report generation, email/SMS send, payment initiation, file upload. Look for the *absence* of rate-limiting middleware, API gateway throttle config, or per-IP/per-user caps on these routes. The specific middleware varies by framework — what matters is whether any mechanism exists, not which one.
  
 **23. Race conditions / TOCTOU**
 Check-then-act patterns on financial state, inventory, quotas, coupons, or one-time tokens. Flag even if the exploit path is unclear. Include: read-modify-write without locking, double-spend on payment callbacks, concurrent redemption of single-use codes.
  
 **24. Webhook / callback verification**
-Incoming POSTs from third parties (Stripe, PayPal, Braintree, Twilio, GitHub, partner systems) without HMAC/signature verification, replay protection (timestamp + nonce), or proper IP/origin checks. Flag: raw `req.body` trusted without `stripe.webhooks.constructEvent()` or equivalent.
+Incoming HTTP requests from third parties (payment processors, partner systems, CI/CD, messaging platforms) accepted without verifying authenticity. The pattern: the server trusts the request body/headers solely because they arrived at a known endpoint URL, without HMAC/signature verification, replay protection (timestamp + nonce), or sender IP/origin validation. The specific verification mechanism varies by provider — what matters is whether *any* authenticity check exists before the payload influences state.
  
 ### Code quality and dependencies
  
@@ -139,14 +148,17 @@ User-controlled request body fields automatically mapped to internal model field
 Allows setting `isAdmin`, `role`, `price`, `balance` from request body.
  
 **26. Prototype pollution (JavaScript/Node.js only)**
-`lodash.merge`, `lodash.defaultsDeep`, `Object.assign`, deep-clone/deep-merge libraries, `JSON.parse` + recursive merge with user-controlled keys (`__proto__`, `constructor`, `prototype`). Check: `req.body` or `req.query` reaching any deep merge without key sanitization.
+Any recursive or deep merge operation where user-controlled input supplies object keys — enabling prototype chain pollution via `__proto__`, `constructor.prototype`, or similar. The vulnerability is the *pattern* (untrusted keys reaching a property-setting operation that walks the prototype chain), not any specific library. Common sinks include `lodash.merge`, `deepmerge`, `defu`, `Object.assign` with nested spread, or custom recursive merge utilities. Check: `req.body` or `req.query` reaching any deep/recursive property-setting operation without key sanitization or `Object.create(null)` as the target.
  
 **27. Dependency CVEs**
 Flag only if a known CVE is identifiable directly from lockfiles (`package-lock.json`, `go.sum`, `requirements.txt`, `pom.xml`, `Gemfile.lock`, `Cargo.lock`, `yarn.lock`, `pnpm-lock.yaml`). Include the advisory ID (GHSA/CVE) and affected version. Do not guess based on package names or version ranges alone.
  
 **28. Supply chain: typosquat, dependency confusion, install scripts, unpinned actions**
-Typosquatted package names (e.g. `lod-ash` instead of `lodash`, `colars` instead of `colors`). Private package names without `@scope` that could be claimed on public registries (dependency confusion). `preinstall`/`postinstall`/`install` scripts in `package.json` that execute arbitrary code (check `scripts` section of all `package.json` files in the repo). GitHub Actions using `@main`/`@master` branch references instead of pinned SHA (`uses: owner/action@main` vs `uses: owner/action@sha256`). Unpinned Terraform module sources.
- 
+Dependency-level risks that don't show up as CVEs but enable code execution during install or build. The patterns:
+- **Typosquatting**: package names one character off from popular packages (check against known-popular names in the ecosystem).
+- **Dependency confusion**: private/internal package names that lack a scope or namespace and could be claimed on the public registry.
+- **Install scripts**: lifecycle hooks in package manifests (`preinstall`/`postinstall` in `package.json`, `setup.py` with `cmdclass`, `build.rs` in Cargo) that execute arbitrary code at install time.
+- **Unpinned CI actions/modules**: CI/CD steps or IaC modules referencing mutable tags (`@main`, `@latest`) instead of immutable SHAs or digests.
 **29. Cryptographic implementation flaws**
 Weak hashes for passwords (MD5, SHA1, unsalted). Insecure modes (ECB). Hardcoded IVs/nonces. Nonce reuse in AES-GCM/ChaCha20. Non-CSPRNG sources for tokens, session IDs, or keys:
 - **JS/TS**: `Math.random()` for secrets; `===` instead of `crypto.timingSafeEqual()` for token comparison
@@ -514,4 +526,3 @@ Group findings by remediation batch, not by individual finding number.
 ```
 *Report generated from static analysis of repository `{repo_name}` at review time. Re-validate findings after remediation and in target deployment configuration.*
 ```
- 
