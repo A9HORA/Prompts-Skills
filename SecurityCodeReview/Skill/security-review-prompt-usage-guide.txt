@@ -1,0 +1,126 @@
+Security Review Prompt Skill — Usage Guide
+==========================================
+
+Skill version: 3.3
+Files:
+  - SKILL.md (194 lines) — workflow and routing
+  - references/review-prompt.md (808 lines) — full 80-category methodology
+
+
+INSTALLATION
+------------
+
+Claude Code:
+  cp -r security-review-prompt/ ~/.claude/skills/security-review-prompt/
+
+Claude.ai (if you have access):
+  cp -r security-review-prompt/ /mnt/skills/user/security-review-prompt/
+
+Start a NEW conversation after installing. Existing conversations won't see the skill.
+
+
+BASIC USAGE
+-----------
+
+Say something like:
+
+  "Security review the repo at /path/to/repo"
+
+That's it. The skill triggers automatically.
+
+
+WITH SERVICE CONTEXT (optional but recommended for sensitive services)
+---------------------------------------------------------------------
+
+  "Security review the card-manager service at /Users/me/workspace/next-profile.
+   It handles credit card add/update/delete for customers. PCI scope.
+   Auth is JWT via Okta. Deployed on GKE. Prioritize categories 9, 10, 16, 23."
+
+Service context calibrates severity. A missing auth check on a card deletion
+endpoint gets rated Critical instead of High.
+
+
+TRIGGER PHRASES
+---------------
+
+Any of these will activate the skill:
+
+  - "security review this repo"
+  - "scan this codebase for vulnerabilities"
+  - "do a security audit"
+  - "run a security assessment"
+  - "find vulnerabilities"
+  - "check for security issues"
+  - "pentest this code"
+  - "check for hardcoded secrets"
+  - "scan git history for secrets"
+  - "run the 80-category scan"
+  - "use v3.3"
+  - "check category 9 and 16 on this service"
+  - "is this code vulnerable to SSRF"
+
+
+WHAT HAPPENS BEHIND THE SCENES
+-------------------------------
+
+1. Claude sees your message, checks available_skills, matches it to this skill.
+2. Claude reads SKILL.md (194 lines) — gets the workflow steps.
+3. Step 1 tells Claude to read references/review-prompt.md (808 lines) — loads
+   all 80 category definitions, patterns, chain escalation rules, report template.
+4. Claude follows the workflow:
+   a. Platform detection (reads manifest files, activates relevant modules)
+   b. Gitleaks check (runs if installed, falls back to manual if not)
+   c. Scans all activated categories using grep/ripgrep across entire repo
+   d. Applies 13 chain escalation rules
+   e. Generates the report
+5. Report saved to: {REPO_NAME}-security-assessment-report-{date}.md
+
+
+OUTPUT
+------
+
+A single Markdown file containing:
+
+  1. Report header (platform modules, service context, gitleaks stats)
+  2. Findings summary table (sorted: Critical > High > Medium, then by confidence)
+  3. Individual findings with:
+     - Severity + CVSS score
+     - Confidence rating
+     - CWE / OWASP references
+     - Execution flow (entry to sink, each step cited with file:line)
+     - Steps to reproduce (curl commands, git commands for secrets)
+     - Affected code (secrets redacted: first 8 + ... + last 4 chars)
+     - Recommended fix (concrete code change)
+  4. Categories reviewed with no findings (proves coverage)
+  5. Positive controls observed (what's working correctly)
+  6. Remediation priority (immediate / urgent / short-term / planned)
+
+
+GITLEAKS DEPENDENCY
+-------------------
+
+Gitleaks is optional. If installed, the skill runs automated git history scanning.
+If not installed, it falls back to manual git grep / git log commands.
+
+To install:
+  brew install gitleaks      (macOS)
+  apt install gitleaks       (Linux)
+
+The report notes when gitleaks is absent and recommends installing it.
+
+
+FILE STRUCTURE
+--------------
+
+security-review-prompt/
+├── SKILL.md                          Workflow + quick reference (194 lines)
+└── references/
+    └── review-prompt.md              Full v3.3 prompt (808 lines)
+
+SKILL.md is loaded when the skill triggers.
+review-prompt.md is loaded on demand (Step 1 of the workflow).
+
+This split exists because the skill description (~100 words) is always in Claude's
+context. If the full 808-line prompt was in SKILL.md, it would load into every
+conversation whether you're doing a security review or not. The split keeps
+conversations fast and context-efficient.
