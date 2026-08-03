@@ -1,4 +1,4 @@
-# Universal source code security review prompt
+# Source code security review prompt with gitleaks
  
 > **Version:** 3.3
 > **Categories:** 80 (37 base + 39 platform-specific + 4 git history)
