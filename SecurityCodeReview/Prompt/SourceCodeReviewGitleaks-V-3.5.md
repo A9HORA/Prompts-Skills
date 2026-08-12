@@ -1,9 +1,10 @@
 # Source code security review prompt with gitleaks
 
-> **Version:** 3.4
+> **Version:** 3.5
 > **Categories:** 85 (37 base + 39 platform-specific + 4 git history + 5 AI/agent supply chain)
 > **Scope:** Backend, frontend, mobile, AI/LLM, agents/MCP, scripts, CI/CD, infrastructure, desktop/native, **git history**
 > **Last updated:** 2026-08-12
+> **Changelog v3.5:** **Licensing correction — CodeQL is no longer the default cross-file engine.** The CodeQL CLI terms forbid use "in connection with any codebase that is not an Open Source Codebase" and forbid database generation "during automated analysis, CI or CD" without a paid GitHub Code Security / Advanced Security licence (github/codeql-cli-binaries LICENSE.md). Phase 0 now gates CodeQL behind an explicit licence check and adds **Joern** (Apache 2.0) as the default free cross-file taint engine, plus per-language free alternatives and a **Semgrep + call-graph bridge** for languages neither covers. Added a cross-file dataflow coverage matrix, a new Phase 0 sub-step (0d), a mandatory `Cross-file dataflow` report-header field, and a confidence rule that intra-procedural-only analysis cannot produce a high-confidence negative.
 > **Changelog v3.4:** Added **Phase 0** mechanical pre-pass (gitleaks + Semgrep + CodeQL + language linters + IaC scanners, SARIF ingestion, tool/LLM dedup rules). Added **Phase A** repo inventory and scoped traversal with a mandatory coverage ledger (no silent sampling). Added **Phase B** mechanical authorization matrix with a separate object-level ownership pass. Rewrote category 27 with tiered reachability determination (reachable-confirmed / reachable-uncertain / not-reachable / unreachable-dev-only), EPSS + CISA KEV prioritization, and VEX mapping. Extended category 26 beyond JavaScript to Python class pollution and Ruby recursive-merge pollution. Added categories 81–85: ML model deserialization, model provenance/`trust_remote_code`, MCP client/server security, agent skill/rule file poisoning, agent memory poisoning. Added 5 chain escalation rules. Added reviewer-hardening rule against prompt injection from repository content. Updated quality bar, confidence rules, exclusions, report header, and deliverable structure.
 > **Changelog v3.3:** Added optional Service Context section for business-function-aware severity assessment. Added CWE/OWASP references as a required per-finding field. Findings summary table and report body now sorted by severity descending (Critical → High → Medium), then by confidence descending within same severity.
 > **Changelog v3.2:** Added Git History module (categories 77–80, always applied). Expanded category 12 with redaction rules, encoding-aware scanning, and secret format patterns. Added gitleaks integration. Updated version header, quality bar, chain escalation rules, exclusions, confidence definitions, report header, and deliverable structure to cover git history findings.
@@ -54,11 +55,26 @@ semgrep scan \
   --config p/secrets \
   --sarif -o semgrep.sarif
 
-# CodeQL — dataflow / taint queries (compiled languages need a build or none-mode)
+# Cross-file (interprocedural) taint — pick ONE per the licence gate below.
+
+# Option A — Joern (Apache 2.0, no licence restriction on closed source). DEFAULT.
+#   Languages: C/C++, Java, JVM bytecode, binaries, JavaScript, Python, Kotlin.
+joern-parse <module-path> --output cpg.bin
+joern --script queries/taint.sc --param cpgFile=cpg.bin > joern-findings.txt
+#   or the batch scanner:
+joern-scan <module-path> --overwrite > joern-scan.txt
+
+# Option B — CodeQL. ONLY if the repo is open source, OR the org holds a
+#   GitHub Code Security / Advanced Security licence. See licence gate.
 codeql database create db --language=<javascript|python|java|go|csharp|ruby|swift|rust>
 codeql database analyze db \
   codeql/<lang>-queries:codeql-suites/<lang>-security-extended.qls \
   --format=sarif-latest --output=codeql.sarif
+
+# Option C — per-language free interprocedural taint, where Joern has no frontend
+pysa --no-saved-state analyze > pysa.json    # Python (Meta Pyre) — verify licence
+infer run -- <build command>                 # Java / C / C++ / ObjC (Meta) — verify licence
+psalm --taint-analysis                       # PHP — verify licence
 
 # Language-specific linters
 bandit -r . -f sarif -o bandit.sarif          # Python
@@ -75,10 +91,72 @@ osv-scanner --call-analysis=all --format sarif -o osv.sarif ./  # Go default, Ru
 ```
 
 Tool notes:
-- Semgrep CE analyzes interactions **within a single function only**; cross-file (interfile) dataflow is a paid Pro feature (semgrep.dev). If only CE is available, record that cross-file taint was not analyzed in the coverage ledger.
+- Semgrep CE analyzes interactions **within a single function only**; cross-file (interfile) dataflow is a paid Pro feature (semgrep.dev). CE alone therefore cannot answer "does untrusted input reach this sink from another file."
 - CodeQL `sarif-latest` emits SARIF v2.1.0 (docs.github.com). Compiled languages historically require a build; buildless `none` mode exists for C/C++, C#, Java, Rust.
+- Joern builds a code property graph and has a real interprocedural taint engine: "For internally defined methods, this can simply be tracked within the CPG. For externally defined (or unresolvable) methods, this will be (soundly) overapproximated to propagate the taint to and from all parameters and return values" (joern.io/blog/interproc-dataflow-2024). Overapproximation means false positives on unresolved external calls — supply method summaries to reduce it. Query language is Scala-based and needs a JVM (docs.joern.io).
 - OSV-Scanner Rust call analysis compiles the project and runs `build.rs` (arbitrary code). Sandbox it.
-- If a tool cannot run (no build, unsupported language, missing binary), record it in the coverage ledger as **not covered — reason**. Do not silently proceed as if it ran.
+- If a tool cannot run (no build, unsupported language, missing binary, licence gate closed), record it in the coverage ledger as **not covered — reason**. Do not silently proceed as if it ran.
+
+### 0a — CodeQL licence gate (mandatory check before running Option B)
+
+> ⚠️ **Do not run CodeQL on a private commercial repository without a licence.** The CodeQL CLI terms state the software may not be used "To otherwise or in any other context generate any CodeQL database for or during automated analysis, CI or CD" nor "in connection with any codebase that is not an Open Source Codebase (e.g., code in a private repo in GitHub)" — unless "your use of the Software is under a paid customer license for GitHub Advanced Security" (github/codeql-cli-binaries LICENSE.md). GitHub's docs restate this: free on public repositories, otherwise requiring a GitHub Code Security licence (docs.github.com, About the CodeQL CLI).
+
+Answer both before proceeding:
+
+| Question | If yes | If no |
+|---|---|---|
+| Is the repository an open source codebase on a public host? | CodeQL permitted | continue below |
+| Does the org hold a paid GitHub Code Security / Advanced Security licence? | CodeQL permitted, including in CI | **CodeQL is not available** — use Joern (Option A) or Option C |
+
+Record the outcome in the report header. An unlicensed CodeQL run is a compliance finding against the reviewer, not a shortcut.
+
+### 0b — cross-file dataflow coverage matrix (required)
+
+Cross-file taint availability is language-dependent. Fill this in and carry it to the report header — it determines what a negative finding is worth.
+
+| Language | Free cross-file engine | Notes |
+|---|---|---|
+| Java, Kotlin, JVM bytecode | Joern; Infer | Joern frontend exists |
+| C / C++ / binaries | Joern; Infer | Joern frontend exists |
+| Python | Joern; Pysa | Pysa is purpose-built for taint |
+| JavaScript / TypeScript | Joern | precision on dynamic patterns is limited |
+| PHP | Psalm `--taint-analysis` | no Joern frontend |
+| Go | **none free that I can confirm** | `gosec` is intra-procedural; use the 0c bridge |
+| Ruby | **none free that I can confirm** | Brakeman does Rails-aware tracing, not general taint |
+| C# | **none free that I can confirm** | use the 0c bridge |
+
+Licences for Pysa, Infer, and Psalm are not verified in this prompt — confirm each project's own licence before use on closed source. Where the row says "none free that I can confirm," do not claim cross-file coverage; run step 0c and label results accordingly.
+
+### 0c — Semgrep + call-graph bridge (for languages with no free taint engine)
+
+A cheaper substitute that proves a *call path* exists, not that tainted data survives it. Use it for Go, Ruby, C#, and anywhere Joern's frontend is weak.
+
+1. Run Semgrep CE; collect sinks with `file:line` from SARIF.
+2. Build a call graph or reference index:
+
+```bash
+# exact cross-file definition/reference resolution (SCIP indexers)
+scip-python index . && scip-typescript index . && scip-java index .
+# call graphs / module graphs
+pycg --package <pkg> <files> -o pycg.json          # Python
+dependency-cruiser --output-type json src > dc.json # JS/TS modules
+madge --json src > madge.json                       # JS/TS modules
+# Go — same library family govulncheck uses
+#   golang.org/x/tools/go/callgraph (write a small driver, or use an existing wrapper)
+```
+
+3. Walk callers upward from each sink until you either reach a route handler present in the Phase B authorization matrix, or exhaust the graph.
+4. Label the result: `path-to-entrypoint` (a caller chain reaches a route) or `no-path-found`.
+
+Limits, stated in every finding that uses this method: it overreports, because a reachable call path does not prove the tainted value survives sanitization along it; and it underreports on reflection, dynamic dispatch, `eval`, and framework dependency injection. Licences for the indexers above are not verified here.
+
+### 0d — what a negative finding is worth
+
+Record per module which of these ran, because "no findings" means different things:
+
+- **taint-engine coverage** (Joern, CodeQL under licence, Pysa, Infer, Psalm) — a negative is meaningful evidence.
+- **bridge coverage** (0c) — a negative means no call path was found; it is weak evidence, not proof.
+- **intra-procedural only** (Semgrep CE alone) — a negative is **not** evidence about cross-file flows. Do not write "no injection findings" for such a module; write "no intra-function injection findings; cross-file taint not analyzed."
 
 ### SARIF ingestion
 
@@ -197,7 +275,7 @@ Concatenate partials. Dedup by `(normalized file path, line ±3, category)`, kee
 |---|---|---|---|
 | 27 Dependencies | payments-svc | covered | |
 | 9 Authorization | admin-ui | partial | routes enumerated; object-ownership pass pending |
-| 1 Injection | legacy-batch | not covered | CodeQL DB creation failed (no build); grep-only pass performed |
+| 1 Injection | legacy-batch | partial | no free cross-file engine for Go; Semgrep CE + 0c bridge only, cross-file taint not proven |
 
 **Hard rule:** every file in `git ls-files` is either read, or listed in a "Files not read" section with a reason. Silent sampling is a review failure and violates the Search behavior section below. If coverage is incomplete, say so in the header — do not present a partial review as complete.
 
@@ -1122,6 +1200,11 @@ Each finding must have a confidence rating:
 
 Never output `reachable-confirmed` without a printed call chain. Never output `not-reachable` for a reflection-, `eval`-, or deserialization-heavy codebase without stating the false-negative risk.
 
+**Additional guidance on cross-file analysis depth** *(new v3.5)*:
+- A finding whose taint path crosses files may be **high** confidence only if a taint engine (Joern, licensed CodeQL, Pysa, Infer, Psalm) produced the path, or the path was traced manually with `file:line` citations at each hop.
+- A finding derived from the 0c call-graph bridge is at most **medium** — a call path is not a proven data path.
+- **An intra-procedural-only pass cannot produce a high-confidence negative.** If Semgrep CE was the only engine for a module, every "no findings" statement for that module must say cross-file taint was not analyzed. Record it in the coverage ledger as `partial`, never `covered`.
+
 **Additional guidance for AI supply chain findings (categories 81–85)** *(new v3.4)*:
 - **high** — dangerous load/trust pattern visible in source (`weights_only=False`, `trust_remote_code=True`, unpinned `from_pretrained`, untrusted skill file present)
 - **medium** — pattern present but the source's trust level or the model/skill provenance cannot be determined from the repo
@@ -1155,8 +1238,11 @@ A single markdown file suitable for engineering and security stakeholders.
 | Repo size | {file count} files, {LOC} LOC across {module count} modules |
 | Modules reviewed | {n of m} — see Coverage ledger |
 | Files not read | {count} — see Files not read |
-| Phase 0 tools run | gitleaks {ver}, semgrep {ver}, codeql {ver}, {others} — {any tool that failed and why} |
+| Phase 0 tools run | gitleaks {ver}, semgrep {ver}, joern {ver}, {others} — {any tool that failed and why} |
 | Semgrep mode | {CE (intra-function only) / Pro (interfile)} |
+| CodeQL licence gate | {open source — permitted / Code Security licence held — permitted / not available — not run} |
+| Cross-file dataflow | {engine used per language, per the 0b matrix; list any language with no cross-file coverage} |
+| Negative-finding strength | {taint-engine / bridge-only / intra-procedural-only, per module — see 0d} |
 | Phase 0 findings | {raw count} raw → {validated count} validated → {dismissed count} dismissed as FP (each with cited control) |
 | Gitleaks findings (raw) | {count from gitleaks-current} current tree, {count from gitleaks-history} history |
 | Gitleaks findings (validated) | {count after dedup and false-positive removal} |
@@ -1184,7 +1270,7 @@ Include this section verbatim:
 >
 > **Reachability** (category 27 only): `reachable-confirmed` / `reachable-uncertain` / `not-reachable` / `unreachable-dev-only`, each with required evidence.
 >
-> **Source**: which detector found it — `semgrep:{ruleId}`, `codeql:{ruleId}`, `gitleaks:{RuleID}`, `govulncheck`, or `review` (reasoning-only).
+> **Source**: which detector found it — `semgrep:{ruleId}`, `joern:{query}`, `codeql:{ruleId}`, `pysa`/`infer`/`psalm`, `bridge:0c`, `gitleaks:{RuleID}`, `govulncheck`, or `review` (reasoning-only).
 
 ### Findings summary table
 
@@ -1207,7 +1293,7 @@ Present findings in the report body in the same order as the summary table: all 
 
 **Confidence** — high / medium / low.
 
-**Source** *(new v3.4)* — `semgrep:{ruleId}` / `codeql:{ruleId}` / `gitleaks:{RuleID}` / `govulncheck` / `osv-scanner` / `review`. If both a tool and reasoning found it, list the tool (per the dedup rule).
+**Source** *(v3.4, extended v3.5)* — `semgrep:{ruleId}` / `joern:{query}` / `codeql:{ruleId}` / `pysa` / `infer` / `psalm` / `bridge:0c` / `gitleaks:{RuleID}` / `govulncheck` / `osv-scanner` / `review`. If both a tool and reasoning found it, list the tool (per the dedup rule). For `bridge:0c`, state the caller chain and the overreporting caveat from step 0c.
 
 **Reachability** *(category 27 only, new v3.4)* — tier plus the required evidence, plus CISA KEV membership and EPSS score.
 
@@ -1352,6 +1438,8 @@ After all findings, include:
 
 List every activated category that had no Critical/High/Medium findings, with a one-line note explaining why (e.g., "no user-input file paths in server", "Apple Pay validates gateway hosts at `file:line`", "all model loads use safetensors at `src/model.py:22`").
 
+**Required qualifier** *(new v3.5)*: for any injection, SSRF, path traversal, XSS, or SSTI category cleared in a module that had no taint-engine coverage, the note must state the analysis depth — e.g. "no intra-function findings; cross-file taint not analyzed (no free engine for Go)". A bare "no findings" on an intra-procedural-only pass overstates the evidence.
+
 ### Positive controls observed (required)
 
 List security controls that are correctly implemented. These provide audit evidence and highlight what NOT to break during remediation. Format:
@@ -1374,6 +1462,7 @@ For dependencies, authorization, and AI (new v3.4):
 - Models loaded from `safetensors` with pinned revision — `src/model_loader.py:19`
 - `trust_remote_code` explicitly disabled — `src/model_loader.py:24`
 - MCP tool definitions pinned with re-approval on change — `mcp.json:3`
+- Cross-file taint analysis in CI (Joern / licensed CodeQL) — `.github/workflows/security.yml:52`
 
 ### Remediation priority (required)
 
@@ -1406,5 +1495,5 @@ The following require action BEFORE reading the rest of this report:
 ## Footer
 
 ```
-*Report generated from static analysis, mechanical tool output (see Phase 0 tools run), dependency reachability assessment, and git history scan of repository `{repo_name}` at review time. Coverage is bounded by the Coverage ledger and Files not read sections — read those before treating this review as complete. Secrets identified in git history remain extractable until history is rewritten (git-filter-repo / BFG) and all clones are refreshed. Rotation of compromised credentials is required regardless of history purge — assume any committed secret is compromised. Dependency findings assessed as unreachable are recorded with their evidence and are open to challenge. Re-validate findings after remediation and in target deployment configuration.*
+*Report generated from static analysis, mechanical tool output (see Phase 0 tools run), dependency reachability assessment, and git history scan of repository `{repo_name}` at review time. Coverage is bounded by the Coverage ledger and Files not read sections — read those before treating this review as complete. Secrets identified in git history remain extractable until history is rewritten (git-filter-repo / BFG) and all clones are refreshed. Rotation of compromised credentials is required regardless of history purge — assume any committed secret is compromised. Dependency findings assessed as unreachable are recorded with their evidence and are open to challenge. Cross-file dataflow coverage varies by language — see the Cross-file dataflow and Negative-finding strength header fields before treating any cleared category as cleared. Re-validate findings after remediation and in target deployment configuration.*
 ```
