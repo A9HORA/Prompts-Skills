@@ -1,2 +1,2 @@
 # Prompts-Skills
-This report contains all the prompts & skills that I created for pariticualr use case.
+This repo contains all the prompts & skills that I created for particular use case.
